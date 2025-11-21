@@ -5,12 +5,10 @@ import datetime
 import os
 import math
 import urllib.request
-import io  # عشان نقرأ البيانات النصية
 from skyfield.api import load, wgs84
 
 # ---------------------------------------------------------
-# 1. بيانات الطوارئ (Fallback Data)
-# عشان لو النت فصل، الموقع يفضل شغال ببيانات مخزنة
+# 1. بيانات الطوارئ (Offline Backup)
 # ---------------------------------------------------------
 FALLBACK_TLE_DATA = """
 ISS (ZARYA)
@@ -88,19 +86,19 @@ def calculate_footprint_area(altitude_km):
     return area_m2
 
 # ---------------------------------------------------------
-# 5. تحميل البيانات (النظام الذكي Smart Loader)
+# 5. تحميل البيانات (Fix for TypeError)
 # ---------------------------------------------------------
 @st.cache_resource
 def load_data():
     ts = load.timescale()
     local_filename = '/tmp/active_sats.txt'
+    fallback_filename = '/tmp/fallback_sats.txt' # ملف احتياطي للطوارئ
     url = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle'
     sats = []
     
-    # المحاولة الأولى: التحميل من النت
     try:
+        # محاولة التحميل من النت
         if not os.path.exists(local_filename):
-            # بنحط timeout عشان لو طول يفصل بسرعة ويروح للخطة البديلة
             with urllib.request.urlopen(url, timeout=5) as response:
                 content = response.read()
                 with open(local_filename, 'wb') as f:
@@ -110,38 +108,36 @@ def load_data():
         st.sidebar.success("✅ Data Source: Live Network")
         
     except Exception as e:
-        # لو حصل أي خطأ (نت فاصل، سيرفر واقع)، شغل نظام الطوارئ
-        st.sidebar.warning(f"⚠️ Network Error: {e}")
-        st.sidebar.info("🔄 Switching to Offline Backup Mode...")
+        st.sidebar.warning(f"⚠️ Connection Failed: {e}")
+        st.sidebar.info("🔄 Using Offline Backup...")
         
-        # تحميل البيانات من المتغير اللي فوق (FALLBACK_TLE_DATA)
-        # بنحول النص لملف وهمي في الذاكرة عشان المكتبة تقرأه
-        f_obj = io.BytesIO(FALLBACK_TLE_DATA.encode('utf-8'))
-        sats = load.tle_file(f_obj)
+        # الحل: نحفظ بيانات الطوارئ في ملف حقيقي الأول
+        # عشان المكتبة متضربش Error
+        with open(fallback_filename, 'w', encoding='utf-8') as f:
+            f.write(FALLBACK_TLE_DATA)
+            
+        sats = load.tle_file(fallback_filename)
         
     return ts, sats
 
 ts, all_satellites = load_data()
 
 if not all_satellites:
-    st.error("❌ Critical Error: Could not load satellite data.")
+    st.error("❌ System Halted: No data available.")
     st.stop()
 
 # تكوين الفريق
 target_names = ['ISS (ZARYA)', 'NILESAT 201', 'BADR-4', 'TIANGONG', 'NAVSTAR 80', 'HUBBLE', 'STARLINK']
 my_fleet = []
 
-# تصفية الأقمار (إما بالاسم أو النوع)
 for name in target_names:
     for sat in all_satellites:
         if name in sat.name:
-            # بنمنع التكرار
             if not any(sat.name == s.name for s in my_fleet):
                 my_fleet.append(sat)
-            # لو ستارلينك، كفاية 5 بس
             if 'STARLINK' in name and len([s for s in my_fleet if 'STARLINK' in s.name]) >= 5:
                 break
-            if 'STARLINK' not in name: # للأقمار الوحيدة زي نايل سات، خد واحد بس واخرج
+            if 'STARLINK' not in name:
                 break
 
 # ---------------------------------------------------------
@@ -169,7 +165,7 @@ if my_fleet:
         else:
             st.sidebar.warning("No visible passes.")
 else:
-    st.sidebar.warning("System Initializing...")
+    st.sidebar.warning("Initializing...")
 
 # ---------------------------------------------------------
 # 7. العرض الحي
