@@ -3,7 +3,8 @@ import pandas as pd
 import time
 import datetime
 import os
-import math  # 1. ضفنا مكتبة الرياضيات
+import math
+import urllib.request  # مكتبة التحميل اليدوي
 from skyfield.api import load, wgs84
 
 # ---------------------------------------------------------
@@ -16,7 +17,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ستايل CSS لتنسيق الأرقام
 st.markdown("""
 <style>
     [data-testid="stMetricValue"] {
@@ -32,8 +32,6 @@ st.markdown("""
 # 2. القائمة الجانبية
 # ---------------------------------------------------------
 st.sidebar.title("⚙️ Control Panel")
-
-# اختيار الموقع
 st.sidebar.subheader("📍 Base Station")
 city_options = {
     "Cairo (Egypt)": (30.0444, 31.2357),
@@ -47,11 +45,8 @@ selected_city = st.sidebar.selectbox("Select Location", list(city_options.keys()
 user_lat, user_long = city_options[selected_city]
 my_location = wgs84.latlon(user_lat, user_long)
 
-# زرار التحديث
 st.sidebar.markdown("---")
 if st.sidebar.button("🔄 Force Update TLE Data"):
-    if os.path.exists('active_sats.txt'):
-        os.remove('active_sats.txt')
     st.cache_resource.clear()
     st.rerun()
 
@@ -63,44 +58,57 @@ def get_direction(azimuth_deg):
     ix = round(azimuth_deg / 45)
     return dirs[ix % 8]
 
-# 2. دالة حساب مساحة التغطية (الجديدة)
 def calculate_footprint_area(altitude_km):
     if altitude_km <= 0: return 0
-    R_earth = 6371000  # نصف قطر الأرض بالمتر
+    R_earth = 6371000
     h_meters = altitude_km * 1000
-    
-    # حساب زاوية الأفق
     cos_theta = R_earth / (R_earth + h_meters)
-    # مساحة القبعة الكروية (Spherical Cap Area)
-    # Area = 2 * pi * R^2 * (1 - cos_theta)
     area_m2 = 2 * math.pi * (R_earth**2) * (1 - cos_theta)
     return area_m2
 
 # ---------------------------------------------------------
-# 4. تحميل البيانات
+# 4. تحميل البيانات (النسخة المعدلة للسيرفر)
 # ---------------------------------------------------------
 @st.cache_resource
 def load_data():
     ts = load.timescale()
-    if not os.path.exists('active_sats.txt'):
-        with st.spinner('Downloading fresh satellite data...'):
-            url = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle'
-            sats = load.tle_file(url, filename='active_sats.txt')
-    else:
-        sats = load.tle_file('active_sats.txt')
+    
+    # الحل السحري: بنحفظ الملف في مجلد /tmp المسموح بالكتابة فيه
+    local_filename = '/tmp/active_sats.txt'
+    url = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle'
+    
+    # بنستخدم طريقة تحميل يدوية عشان نتفادى مشاكل Skyfield مع السيرفر
+    try:
+        # لو الملف مش موجود أو إحنا عايزين نحدثه
+        if not os.path.exists(local_filename):
+            with urllib.request.urlopen(url) as response:
+                content = response.read()
+                with open(local_filename, 'wb') as f:
+                    f.write(content)
+        
+        # بنقرأ الملف من المكان الآمن ده
+        sats = load.tle_file(local_filename)
+        
+    except Exception as e:
+        st.error(f"Server Error (TLE Download): {e}")
+        # حل احتياطي لو النت فصل: رجع قائمة فاضية عشان الموقع ميقعش
+        sats = []
+        
     return ts, sats
 
 ts, all_satellites = load_data()
 
+# لو التحميل فشل، وقف الكود هنا عشان ميعملش Error تاني
+if not all_satellites:
+    st.stop()
+
 target_names = ['ISS (ZARYA)', 'NILESAT 201', 'BADR-4', 'TIANGONG', 'NAVSTAR 80', 'HUBBLE']
 my_fleet = []
-
 for name in target_names:
     for sat in all_satellites:
         if name in sat.name:
             my_fleet.append(sat)
             break
-
 sl_count = 0
 for sat in all_satellites:
     if 'STARLINK' in sat.name and sl_count < 5:
@@ -112,30 +120,31 @@ for sat in all_satellites:
 # ---------------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔮 Next 24h Passes")
-prediction_sat_name = st.sidebar.selectbox("Select Satellite", [s.name for s in my_fleet])
 
-target_sat = next((s for s in my_fleet if s.name == prediction_sat_name), None)
+# حماية عشان لو القائمة فاضية
+if my_fleet:
+    prediction_sat_name = st.sidebar.selectbox("Select Satellite", [s.name for s in my_fleet])
+    target_sat = next((s for s in my_fleet if s.name == prediction_sat_name), None)
 
-if st.sidebar.button("Calculate Schedule 📅"):
-    st.sidebar.info(f"Computing passes for **{prediction_sat_name}**...")
-    t0 = ts.now()
-    t1 = ts.from_datetime(t0.utc_datetime() + datetime.timedelta(days=1))
-    times, events = target_sat.find_events(my_location, t0, t1, altitude_degrees=10.0)
-    
-    if len(times) > 0:
-        pass_list = []
-        for ti, event in zip(times, events):
-            event_name = ('🚀 Rise', '☀️ Peak', '📉 Set')[event]
-            pass_list.append({
-                "Time": ti.utc_strftime('%H:%M:%S'),
-                "Event": event_name
-            })
-        st.sidebar.dataframe(pd.DataFrame(pass_list), hide_index=True)
-    else:
-        st.sidebar.warning("No visible passes.")
+    if st.sidebar.button("Calculate Schedule 📅"):
+        st.sidebar.info(f"Computing passes for **{prediction_sat_name}**...")
+        t0 = ts.now()
+        t1 = ts.from_datetime(t0.utc_datetime() + datetime.timedelta(days=1))
+        times, events = target_sat.find_events(my_location, t0, t1, altitude_degrees=10.0)
+        
+        if len(times) > 0:
+            pass_list = []
+            for ti, event in zip(times, events):
+                event_name = ('🚀 Rise', '☀️ Peak', '📉 Set')[event]
+                pass_list.append({"Time": ti.utc_strftime('%H:%M:%S'), "Event": event_name})
+            st.sidebar.dataframe(pd.DataFrame(pass_list), hide_index=True)
+        else:
+            st.sidebar.warning("No visible passes.")
+else:
+    st.sidebar.warning("Waiting for data...")
 
 # ---------------------------------------------------------
-# 6. العرض الحي (مع الحسابات الجديدة)
+# 6. العرض الحي
 # ---------------------------------------------------------
 st.title(f"🛰️ Satellite Operations Center | {selected_city}")
 
@@ -154,37 +163,30 @@ while True:
         subpoint = geocentric.subpoint()
         height_km = subpoint.elevation.km
         
-        # --- 3. الحسابات الجديدة (السرعة + المساحة) ---
-        
-        # أ) حساب السرعة (Speed)
         v_vector = geocentric.velocity.km_per_s
-        speed_kms = math.sqrt(sum(v**2 for v in v_vector)) # معادلة فيثاغورس
-        
-        # ب) حساب مساحة التغطية (Footprint Area)
+        speed_kms = math.sqrt(sum(v**2 for v in v_vector))
         area_m2 = calculate_footprint_area(height_km)
         
-        # --- نهاية الحسابات الجديدة ---
-
         is_visible = alt.degrees > 0
         direction_arrow = get_direction(az.degrees)
         
         if height_km < 2000: 
-            o_type = "LEO (Net)"
-            color = "#00ff00" # Green
+            o_type = "LEO (Internet)"
+            color = "#00ff00"
         elif height_km < 35000: 
             o_type = "MEO (GPS)"
-            color = "#0000ff" # Blue
+            color = "#0000ff"
         else: 
             o_type = "GEO (TV)"
-            color = "#ff0000" # Red
+            color = "#ff0000"
             
         status_icon = "🟢 LIVE" if is_visible else "🔻 OFF"
         
         data_list.append({
             "Satellite": sat.name,
             "Status": status_icon,
-            "Speed (km/s)": f"{speed_kms:.2f}",        # عرض السرعة
-            "Footprint (m²)": f"{area_m2:,.0f}",       # عرض المساحة (بفواصل)
+            "Speed (km/s)": f"{speed_kms:.2f}",
+            "Footprint (m²)": f"{area_m2:,.0f}",
             "Compass": direction_arrow,
             "Elevation": f"{alt.degrees:.1f}°",
             "Altitude (km)": f"{height_km:.0f}",
@@ -198,17 +200,13 @@ while True:
     df = pd.DataFrame(data_list)
 
     with placeholder.container():
-        # الخريطة (زي ما هي عشان الاستقرار)
-        st.map(df, latitude='lat', longitude='lon', size='size', color='color', zoom=1)
-        
-        # الجدول المطور (فيه السرعة والمساحة)
-        st.markdown("### 📊 Live Telemetry (Speed & Footprint)")
-        st.dataframe(
-            # ترتيب الأعمدة للعرض
-            df[["Status", "Satellite", "Speed (km/s)", "Footprint (m²)", "Compass", "Altitude (km)", "Type"]],
-            use_container_width=True,
-            hide_index=True
-        )
+        if not df.empty:
+            st.map(df, latitude='lat', longitude='lon', size='size', color='color', zoom=1)
+            st.markdown("### 📊 Live Telemetry")
+            st.dataframe(
+                df[["Status", "Satellite", "Speed (km/s)", "Footprint (m²)", "Compass", "Altitude (km)", "Type"]],
+                use_container_width=True,
+                hide_index=True
+            )
         
     time.sleep(1)
-    
