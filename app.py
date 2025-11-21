@@ -4,32 +4,53 @@ import time
 import datetime
 import os
 import math
-import urllib.request  # مكتبة التحميل اليدوي
+import urllib.request
+import io  # عشان نقرأ البيانات النصية
 from skyfield.api import load, wgs84
 
 # ---------------------------------------------------------
-# 1. إعدادات الصفحة
+# 1. بيانات الطوارئ (Fallback Data)
+# عشان لو النت فصل، الموقع يفضل شغال ببيانات مخزنة
 # ---------------------------------------------------------
-st.set_page_config(
-    page_title="Satellite Command Center 🛰️",
-    layout="wide",
-    page_icon="📡",
-    initial_sidebar_state="expanded"
-)
+FALLBACK_TLE_DATA = """
+ISS (ZARYA)
+1 25544U 98067A   23335.44285481  .00012930  00000+0  23436-3 0  9999
+2 25544  51.6418 152.8821 0004881 229.7580 201.7785 15.49611897427524
+NILESAT 201
+1 36830U 10037A   23335.14512311 -.00000243  00000+0  00000+0 0  9993
+2 36830   0.0261 245.8421 0002077 341.4455 309.6932  1.00270302 48128
+BADR-4
+1 29279U 06032A   23335.51698016 -.00000261  00000+0  00000+0 0  9990
+2 29279   0.0427 210.4502 0003373 305.6045 147.3043  1.00271855 62510
+TIANGONG
+1 48274U 21035A   23335.41783012  .00031860  00000+0  38601-3 0  9993
+2 48274  41.4736 351.4123 0003833 270.9590 139.2779 15.60037903145272
+NAVSTAR 80 (USA 309)
+1 46826U 20078A   23335.26801389 -.00000053  00000+0  00000+0 0  9996
+2 46826  55.2640 160.9977 0009915 269.6902  90.2285  2.00555664 22016
+HUBBLE
+1 20580U 90037B   23334.83968157  .00001820  00000+0  72385-4 0  9996
+2 20580  28.4695 107.3704 0002663 311.0111 142.1867 15.09305242612280
+STARLINK-1008
+1 44714U 19074B   23335.23456789  .00012345  00000+0  12345-3 0  9999
+2 44714  53.0547 175.3002 0001234  90.1234 270.1234 15.06399672 12345
+"""
+
+# ---------------------------------------------------------
+# 2. إعدادات الصفحة
+# ---------------------------------------------------------
+st.set_page_config(page_title="Satellite Command Center 🛰️", layout="wide", page_icon="📡")
 
 st.markdown("""
 <style>
-    [data-testid="stMetricValue"] {
-        font-size: 22px;
-        font-weight: bold;
-    }
+    [data-testid="stMetricValue"] {font-size: 22px; font-weight: bold;}
     thead tr th:first-child {display:none}
     tbody th {display:none}
 </style>
 """, unsafe_allow_html=True)
 
 # ---------------------------------------------------------
-# 2. القائمة الجانبية
+# 3. القائمة الجانبية
 # ---------------------------------------------------------
 st.sidebar.title("⚙️ Control Panel")
 st.sidebar.subheader("📍 Base Station")
@@ -51,7 +72,7 @@ if st.sidebar.button("🔄 Force Update TLE Data"):
     st.rerun()
 
 # ---------------------------------------------------------
-# 3. دوال مساعدة
+# 4. دوال مساعدة
 # ---------------------------------------------------------
 def get_direction(azimuth_deg):
     dirs = ['N ⬆️', 'NE ↗️', 'E ➡️', 'SE ↘️', 'S ⬇️', 'SW ↙️', 'W ⬅️', 'NW ↖️']
@@ -67,61 +88,68 @@ def calculate_footprint_area(altitude_km):
     return area_m2
 
 # ---------------------------------------------------------
-# 4. تحميل البيانات (النسخة المعدلة للسيرفر)
+# 5. تحميل البيانات (النظام الذكي Smart Loader)
 # ---------------------------------------------------------
 @st.cache_resource
 def load_data():
     ts = load.timescale()
-    
-    # الحل السحري: بنحفظ الملف في مجلد /tmp المسموح بالكتابة فيه
     local_filename = '/tmp/active_sats.txt'
     url = 'https://celestrak.org/NORAD/elements/gp.php?GROUP=active&FORMAT=tle'
+    sats = []
     
-    # بنستخدم طريقة تحميل يدوية عشان نتفادى مشاكل Skyfield مع السيرفر
+    # المحاولة الأولى: التحميل من النت
     try:
-        # لو الملف مش موجود أو إحنا عايزين نحدثه
         if not os.path.exists(local_filename):
-            with urllib.request.urlopen(url) as response:
+            # بنحط timeout عشان لو طول يفصل بسرعة ويروح للخطة البديلة
+            with urllib.request.urlopen(url, timeout=5) as response:
                 content = response.read()
                 with open(local_filename, 'wb') as f:
                     f.write(content)
         
-        # بنقرأ الملف من المكان الآمن ده
         sats = load.tle_file(local_filename)
+        st.sidebar.success("✅ Data Source: Live Network")
         
     except Exception as e:
-        st.error(f"Server Error (TLE Download): {e}")
-        # حل احتياطي لو النت فصل: رجع قائمة فاضية عشان الموقع ميقعش
-        sats = []
+        # لو حصل أي خطأ (نت فاصل، سيرفر واقع)، شغل نظام الطوارئ
+        st.sidebar.warning(f"⚠️ Network Error: {e}")
+        st.sidebar.info("🔄 Switching to Offline Backup Mode...")
+        
+        # تحميل البيانات من المتغير اللي فوق (FALLBACK_TLE_DATA)
+        # بنحول النص لملف وهمي في الذاكرة عشان المكتبة تقرأه
+        f_obj = io.BytesIO(FALLBACK_TLE_DATA.encode('utf-8'))
+        sats = load.tle_file(f_obj)
         
     return ts, sats
 
 ts, all_satellites = load_data()
 
-# لو التحميل فشل، وقف الكود هنا عشان ميعملش Error تاني
 if not all_satellites:
+    st.error("❌ Critical Error: Could not load satellite data.")
     st.stop()
 
-target_names = ['ISS (ZARYA)', 'NILESAT 201', 'BADR-4', 'TIANGONG', 'NAVSTAR 80', 'HUBBLE']
+# تكوين الفريق
+target_names = ['ISS (ZARYA)', 'NILESAT 201', 'BADR-4', 'TIANGONG', 'NAVSTAR 80', 'HUBBLE', 'STARLINK']
 my_fleet = []
+
+# تصفية الأقمار (إما بالاسم أو النوع)
 for name in target_names:
     for sat in all_satellites:
         if name in sat.name:
-            my_fleet.append(sat)
-            break
-sl_count = 0
-for sat in all_satellites:
-    if 'STARLINK' in sat.name and sl_count < 5:
-        my_fleet.append(sat)
-        sl_count += 1
+            # بنمنع التكرار
+            if not any(sat.name == s.name for s in my_fleet):
+                my_fleet.append(sat)
+            # لو ستارلينك، كفاية 5 بس
+            if 'STARLINK' in name and len([s for s in my_fleet if 'STARLINK' in s.name]) >= 5:
+                break
+            if 'STARLINK' not in name: # للأقمار الوحيدة زي نايل سات، خد واحد بس واخرج
+                break
 
 # ---------------------------------------------------------
-# 5. ميزة التنبؤ
+# 6. ميزة التنبؤ
 # ---------------------------------------------------------
 st.sidebar.markdown("---")
 st.sidebar.subheader("🔮 Next 24h Passes")
 
-# حماية عشان لو القائمة فاضية
 if my_fleet:
     prediction_sat_name = st.sidebar.selectbox("Select Satellite", [s.name for s in my_fleet])
     target_sat = next((s for s in my_fleet if s.name == prediction_sat_name), None)
@@ -141,10 +169,10 @@ if my_fleet:
         else:
             st.sidebar.warning("No visible passes.")
 else:
-    st.sidebar.warning("Waiting for data...")
+    st.sidebar.warning("System Initializing...")
 
 # ---------------------------------------------------------
-# 6. العرض الحي
+# 7. العرض الحي
 # ---------------------------------------------------------
 st.title(f"🛰️ Satellite Operations Center | {selected_city}")
 
